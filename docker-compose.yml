@@ -1,0 +1,25 @@
+networks:
+  shared_net:
+    external: true # This network is assumed to be created and managed externally, e.g., by Nginx Proxy Manager.
+
+services:
+  echotts-openai:
+    build: .
+    image: echotts-openai:latest # Make sure you have built this image: docker build -t echotts-openai .
+    container_name: echotts-openai
+    restart: unless-stopped
+    # Environment variables are loaded from a .env file in the same directory as this docker-compose.yml
+    # Create a .env file with your RUNPOD_ENDPOINT, RUNPOD_API_KEY, and optionally BRIDGE_TOKEN, etc.
+    env_file:
+      - .env
+    environment:
+      # Explicitly set API_HOST and API_PORT for the container to listen on the shared network
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      # Optional: Path to voice map file inside the container
+      - VOICE_MAP_FILE=/app/voice_map.json
+    networks:
+      - shared_net
+    volumes:
+      - ./voice_map.json:/app/voice_map.json
+    # No 'ports' mapping is defined as the service will be accessed via the 'shared_net' network

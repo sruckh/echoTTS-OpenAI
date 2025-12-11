@@ -1,0 +1,53 @@
+# Project-specific exclusions
+.env
+CLAUDE.md
+IMPLEMENTATION.md
+.serena/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyd
+*.o
+*.so
+*.egg
+*.egg-info/
+
+# Tests
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Logs
+*.log
+
+# Docker
+# .dockerignore handles what goes into the build context,
+# but it's good to keep track of build outputs here too.
+.dockerignore
+!Dockerfile
+!docker-compose.yml
+!voice_map.json
+
+# Jupyter Notebook / IPython
+.ipynb_checkpoints
+
+# OS-specific files
+.DS_Store
+Thumbs.db
