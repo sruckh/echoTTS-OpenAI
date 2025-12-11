@@ -3,6 +3,7 @@ import httpx
 import logging
 import json
 import os
+import random
 from typing import Optional, Dict
 from app.config import settings
 
@@ -93,7 +94,7 @@ class RunPodClient:
                     "num_steps": 40,
                     "cfg_scale_text": 3.0,
                     "cfg_scale_speaker": 8.0,
-                    "seed": 1234, # Should we randomize?
+                    "seed": random.randint(1, 65535),
                     # Speed might need to be implemented in the RunPod worker or pre/post processing
                     # The prompt implies standard RunPod schema.
                     # If the worker doesn't support speed, we might need ffmpeg speed adjustment.
