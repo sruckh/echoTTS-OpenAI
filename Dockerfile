@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # Install LinaCodec and dependencies
 RUN pip install --no-cache-dir --prefix=/install \
     numpy \
-    torch --index-url https://download.pytorch.org/whl/cpu \
+    torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
     git+https://github.com/ysharma3501/LinaCodec.git
 
 # Stage 2: Final
