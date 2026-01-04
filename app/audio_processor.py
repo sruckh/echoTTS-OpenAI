@@ -88,6 +88,82 @@ class RunPodClient:
         # Backwards-compatible alias; chunking is handled upstream now.
         return await self.process_text(text, voice, speed)
 
+    async def stream_speech(self, text: str, voice: str, speed: float = 1.0):
+        """
+        Stream speech by requesting tokens from RunPod and decoding locally.
+        (Tier 2 Middleware Implementation)
+        """
+        url = settings.ECHOTTS_STREAMING_ENDPOINT or self.run_endpoint
+        
+        payload = {
+            "input": {
+                "text": text,
+                "speaker_voice": self.get_voice_file(voice),
+                "stream": True,
+                "output_format": "linacodec_tokens",
+                "parameters": {
+                    "seed": random.randint(1, 65535),
+                }
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=None) as client:
+            try:
+                async with client.stream("POST", url, json=payload, headers=self.headers) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk_data = json.loads(line)
+                            
+                            # Handle different response formats if needed
+                            # The spec says JSON objects per line
+                            if chunk_data.get('status') == 'complete':
+                                logger.info("RunPod stream completed")
+                                break
+                            
+                            tokens = chunk_data.get('tokens')
+                            embedding = chunk_data.get('embedding')
+                            
+                            if tokens is not None and embedding is not None:
+                                audio_bytes = await self._decode_tokens(tokens, embedding)
+                                if audio_bytes:
+                                    yield audio_bytes
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse stream line as JSON: {line}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Error processing stream chunk: {e}")
+                            continue
+            except Exception as e:
+                logger.error(f"Error during streaming request: {e}")
+                raise
+
+    async def _decode_tokens(self, tokens, embedding) -> bytes:
+        """
+        Decodes LinaCodec tokens using the Python subprocess script.
+        """
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "python3", "scripts/decode_linacodec.py",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            input_data = json.dumps({"tokens": tokens, "embedding": embedding}).encode()
+            stdout, stderr = await process.communicate(input=input_data)
+            
+            if process.returncode != 0:
+                logger.error(f"LinaCodec decoder script failed with code {process.returncode}: {stderr.decode()}")
+                return b""
+                
+            return stdout
+        except Exception as e:
+            logger.error(f"Failed to execute decoder subprocess: {e}")
+            return b""
+
     async def _execute_job(self, text: str, voice: str, speed: float) -> bytes:
         # 1. Submit
         payload = {

@@ -2,9 +2,19 @@
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
+
+# Install git for linacodec install
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Install LinaCodec and dependencies
+RUN pip install --no-cache-dir --prefix=/install \
+    numpy \
+    torch --index-url https://download.pytorch.org/whl/cpu \
+    git+https://github.com/ysharma3501/LinaCodec.git
 
 # Stage 2: Final
 FROM python:3.12-slim
@@ -20,10 +30,16 @@ COPY --from=builder /install /usr/local
 
 # Copy Application
 COPY app ./app
+COPY scripts ./scripts
+COPY voice_map.json ./
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
+
+# Set HF_HOME to a writable location
+ENV HF_HOME=/app/.cache/huggingface
+RUN mkdir -p /app/.cache/huggingface && chown -R appuser:appuser /app/.cache
 
 USER appuser
 

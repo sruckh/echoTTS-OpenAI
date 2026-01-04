@@ -18,8 +18,12 @@ services:
       - API_PORT=8000
       # Optional: Path to voice map file inside the container
       - VOICE_MAP_FILE=/app/voice_map.json
+      # Streaming TTS configuration
+      - ENABLE_STREAMING=${ENABLE_STREAMING:-true}
+      - ECHOTTS_STREAMING_ENDPOINT=${ECHOTTS_STREAMING_ENDPOINT}
     networks:
       - shared_net
     volumes:
       - ./voice_map.json:/app/voice_map.json
+      - ./cache/huggingface:/app/.cache/huggingface
     # No 'ports' mapping is defined as the service will be accessed via the 'shared_net' network

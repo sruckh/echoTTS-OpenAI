@@ -49,7 +49,7 @@ async def verify_token(authorization: str = Header(None)):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "streaming_enabled": settings.ENABLE_STREAMING}
 
 @app.post(
     "/v1/audio/speech", 
@@ -77,7 +77,7 @@ async def create_speech(
             content={"error": {"message": "Input text is empty.", "type": "invalid_request_error"}},
         )
 
-    logger.info(f"Processing request: voice={request.voice}, fmt={request.response_format}")
+    logger.info(f"Processing batch request: voice={request.voice}, fmt={request.response_format}")
 
     async def audio_generator():
         try:
@@ -86,11 +86,10 @@ async def create_speech(
             )
             yield audio_bytes
         except Exception as e:
-            logger.error(f"Error processing request: {e}")
+            logger.error(f"Error processing batch request: {e}")
             return
 
     media_type = f"audio/{request.response_format}"
-    # WAV special case? audio/wav
     if request.response_format == "mp3":
         media_type = "audio/mpeg"
     
@@ -100,4 +99,44 @@ async def create_speech(
         audio_generator(),
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+@app.post("/api/tts/stream")
+async def stream_tts(
+    request: SpeechRequest,
+    _auth: None = Depends(verify_token)
+):
+    """
+    Tier 2 streaming endpoint for EchoTTS service.
+    Outputs 48kHz PCM audio via SSE-like binary stream.
+    """
+    if not settings.ENABLE_STREAMING:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Streaming is disabled", "message": "Set ENABLE_STREAMING=true to enable"}
+        )
+
+    # Validate voice mapping
+    if request.voice.lower() not in runpod_client.voice_map:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": f"Unsupported voice '{request.voice}'.", "type": "invalid_request_error"}},
+        )
+
+    if not request.input or not request.input.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Input text is empty.", "type": "invalid_request_error"}},
+        )
+
+    logger.info(f"Processing streaming request: voice={request.voice}")
+
+    return StreamingResponse(
+        runpod_client.stream_speech(request.input, request.voice, request.speed),
+        media_type="audio/octet-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )

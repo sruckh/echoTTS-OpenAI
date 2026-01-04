@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     REQUIRE_AUTH: bool = False
     BRIDGE_TOKEN: Optional[SecretStr] = None
     
+    # Streaming TTS (Phase 1)
+    ENABLE_STREAMING: bool = True
+    ECHOTTS_STREAMING_ENDPOINT: Optional[str] = None
+
     # Application Logic
     RESPONSE_FORMATS: List[str] = ["mp3", "opus", "aac", "flac", "wav"]
     # Comma-separated map: "openai_voice:runpod_file.mp3,..."
