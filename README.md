@@ -6,15 +6,15 @@
 
 > A high-performance FastAPI bridge that provides OpenAI-compatible TTS endpoints by forwarding requests to RunPod serverless Echo-TTS workers.
 
-This lightweight bridge enables seamless integration with any OpenAI TTS-compatible client while leveraging the cost-efficiency and scalability of RunPod's serverless GPU infrastructure. It intelligently handles text chunking, job orchestration, and audio streaming to deliver low-latency text-to-speech capabilities.
+This lightweight bridge enables seamless integration with any OpenAI TTS-compatible client while leveraging the cost-efficiency and scalability of RunPod's serverless GPU infrastructure. It forwards requests to RunPod, handles voice mapping/auth/concurrency, and streams audio back to deliver low-latency text-to-speech capabilities.
 
 ## ✨ Features
 
 - **🔄 OpenAI Compatible**: Drop-in replacement for OpenAI's `/v1/audio/speech` endpoint
 - **☁️ Serverless Architecture**: Offloads GPU processing to RunPod workers for efficient scaling
-- **📝 Smart Text Chunking**: Automatically splits long texts at natural boundaries to maintain model quality
+- **📝 Upstream Text Chunking**: Text chunking is handled by the RunPod worker endpoint (bridge forwards input as-is)
 - **🎵 Flexible Voice Mapping**: Map OpenAI voices to custom Echo-TTS speaker files
-- **🌊 Streaming Audio**: Reduces latency by streaming audio chunks as they're generated
+- **🌊 Streaming Response**: Returns audio as a stream for OpenAI client compatibility
 - **🔒 Optional Authentication**: Secure the bridge with bearer token authentication
 - **📊 Concurrency Control**: Built-in rate limiting to prevent overloading RunPod endpoints
 - **🐳 Docker Ready**: Containerized deployment with Docker Compose support
@@ -26,9 +26,9 @@ This lightweight bridge enables seamless integration with any OpenAI TTS-compati
 The Echo-TTS Bridge follows a streamlined architecture designed for high performance and reliability:
 
 1. **Client Layer**: Any OpenAI TTS-compatible client sends requests to the bridge
-2. **Bridge Layer**: FastAPI service validates requests, chunks text, and orchestrates processing
-3. **Processing Layer**: RunPod serverless workers handle the actual TTS generation
-4. **Streaming Layer**: Audio chunks are streamed back as they complete for minimal latency
+2. **Bridge Layer**: FastAPI service validates requests and forwards them to RunPod
+3. **Processing Layer**: RunPod serverless workers handle TTS generation (including text chunking if needed)
+4. **Response Layer**: Audio is returned to the client
 
 ## 📊 Data Flow
 
@@ -42,12 +42,9 @@ sequenceDiagram
 
     C->>B: POST /v1/audio/speech
     B->>B: Validate request
-    B->>B: Split text into chunks
-    loop For each chunk
-        B->>R: Submit TTS job
-        R->>B: Return audio data
-        B->>C: Stream audio chunk
-    end
+    B->>R: Submit TTS job
+    R->>B: Return audio data
+    B->>C: Stream audio
 ```
 
 ## 🚀 Quick Start
@@ -166,8 +163,6 @@ Health check endpoint.
 |----------|-------------|---------|
 | `RUNPOD_ENDPOINT` | RunPod serverless endpoint URL | Required |
 | `RUNPOD_API_KEY` | RunPod API key | Required |
-| `MAX_WORDS_PER_CHUNK` | Maximum words per TTS chunk | 40 |
-| `CHUNK_OVERLAP` | Overlapping words between chunks | 0 |
 | `MAX_CONCURRENT_REQUESTS` | Simultaneous RunPod requests | 3 |
 | `REQUIRE_AUTH` | Enable bearer token auth | False |
 | `BRIDGE_TOKEN` | Authentication token | None |
@@ -204,7 +199,7 @@ python -m pytest tests/
 python -m pytest --cov=app tests/
 
 # Run specific test
-python -m pytest tests/test_chunking.py
+python -m pytest tests/
 ```
 
 ## 🐳 Docker Deployment
@@ -266,7 +261,6 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 app/
 ├── main.py              # FastAPI application and endpoints
 ├── config.py            # Configuration management
-├── text_chunking.py     # Text splitting logic
 ├── audio_processor.py   # RunPod client and audio handling
 └── models/
     ├── __init__.py

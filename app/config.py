@@ -14,10 +14,6 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: List[str] = ["*"]
     
-    # Text Processing
-    MAX_WORDS_PER_CHUNK: int = 40
-    CHUNK_OVERLAP: int = 0
-    
     # RunPod Interaction
     MAX_CONCURRENT_REQUESTS: int = 3
     # Timeout for HTTP connect/read to RunPod

@@ -80,9 +80,13 @@ class RunPodClient:
             return list(self.voice_map.values())[0]
         return "EARS p004 freeform.mp3" # Hard fallback
 
-    async def process_chunk(self, text: str, voice: str, speed: float = 1.0) -> bytes:
+    async def process_text(self, text: str, voice: str, speed: float = 1.0) -> bytes:
         async with self.semaphore:
             return await self._execute_job(text, voice, speed)
+
+    async def process_chunk(self, text: str, voice: str, speed: float = 1.0) -> bytes:
+        # Backwards-compatible alias; chunking is handled upstream now.
+        return await self.process_text(text, voice, speed)
 
     async def _execute_job(self, text: str, voice: str, speed: float) -> bytes:
         # 1. Submit

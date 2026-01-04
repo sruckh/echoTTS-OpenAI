@@ -1,12 +1,10 @@
 import logging
-import asyncio
 from fastapi import FastAPI, Header, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.models.schemas import SpeechRequest, ErrorResponse
-from app.text_chunking import split_text_into_chunks
 from app.audio_processor import runpod_client
 
 # Setup Logging
@@ -66,55 +64,30 @@ async def create_speech(
     request: SpeechRequest, 
     _auth: None = Depends(verify_token)
 ):
-    # Validate Voice
+    # Validate voice mapping (fail fast for unmapped voices)
     if request.voice.lower() not in runpod_client.voice_map:
-        # Fallback is handled in client, but explicit validation is requested
-        # However, the config allows a "map all to default" behavior if we just didn't map it.
-        # Strict validation:
-        if request.voice.lower() not in runpod_client.voice_map:
-             # Check if we should fail or fallback.
-             # Implementation doc: "Fail fast if an unmapped voice is requested."
-             return JSONResponse(
-                 status_code=400,
-                 content={"error": {"message": f"Unsupported voice '{request.voice}'.", "type": "invalid_request_error"}}
-             )
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": f"Unsupported voice '{request.voice}'.", "type": "invalid_request_error"}},
+        )
 
-    chunks = list(split_text_into_chunks(
-        request.input, 
-        target_word_count=settings.MAX_WORDS_PER_CHUNK, 
-        overlap_words=settings.CHUNK_OVERLAP
-    ))
-    
-    if not chunks:
-        # Handle empty text
-         return JSONResponse(
-             status_code=400,
-             content={"error": {"message": "Input text is empty.", "type": "invalid_request_error"}}
-         )
+    if not request.input or not request.input.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Input text is empty.", "type": "invalid_request_error"}},
+        )
 
-    logger.info(f"Processing request: {len(chunks)} chunks, voice={request.voice}, fmt={request.response_format}")
+    logger.info(f"Processing request: voice={request.voice}, fmt={request.response_format}")
 
     async def audio_generator():
-        # Create tasks for all chunks
-        # We need to yield them in order.
-        # We can start them all (throttled by semaphore in client)
-        tasks = []
-        for chunk in chunks:
-            tasks.append(asyncio.create_task(
-                runpod_client.process_chunk(chunk, request.voice, request.speed)
-            ))
-        
-        for i, task in enumerate(tasks):
-            try:
-                audio_bytes = await task
-                yield audio_bytes
-            except Exception as e:
-                logger.error(f"Error processing chunk {i}: {e}")
-                # We can't easily send a JSON error inside a stream efficiently without breaking the format.
-                # But we should probably stop.
-                # In HTTP/1.1 chunked, we can't change status code now.
-                # We just stop the stream.
-                break
+        try:
+            audio_bytes = await runpod_client.process_text(
+                request.input, request.voice, request.speed
+            )
+            yield audio_bytes
+        except Exception as e:
+            logger.error(f"Error processing request: {e}")
+            return
 
     media_type = f"audio/{request.response_format}"
     # WAV special case? audio/wav
