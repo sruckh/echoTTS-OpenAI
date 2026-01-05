@@ -15,6 +15,10 @@ class SpeechRequest(BaseModel):
         le=4.0, 
         description="The speed of the generated audio. Select a value from 0.25 to 4.0. 1.0 is the default."
     )
+    stream: Optional[bool] = Field(
+        False,
+        description="Whether to stream the audio response."
+    )
 
     @field_validator('response_format')
     @classmethod

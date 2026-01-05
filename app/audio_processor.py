@@ -4,10 +4,21 @@ import logging
 import json
 import os
 import random
+import torch
+import numpy as np
 from typing import Optional, Dict
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Attempt to import the local decoder for in-process decoding
+try:
+    from scripts.decode_linacodec import SafeLinaCodec
+    DECODER = SafeLinaCodec()
+    logger.info("Local SafeLinaCodec initialized for in-process decoding.")
+except ImportError:
+    DECODER = None
+    logger.warning("SafeLinaCodec not found in scripts/decode_linacodec.py. Falling back to subprocess.")
 
 class RunPodClient:
     def __init__(self):
@@ -81,8 +92,18 @@ class RunPodClient:
         return "EARS p004 freeform.mp3" # Hard fallback
 
     async def process_text(self, text: str, voice: str, speed: float = 1.0) -> bytes:
+        """
+        Aggregate streaming chunks into a single byte buffer for batch requests.
+        Uses the streaming path to ensure reliability if the backend batch path is broken.
+        """
         async with self.semaphore:
-            return await self._execute_job(text, voice, speed)
+            full_audio = b""
+            chunk_count = 0
+            async for chunk in self.stream_speech(text, voice, speed):
+                full_audio += chunk
+                chunk_count += 1
+            
+            return full_audio
 
     async def process_chunk(self, text: str, voice: str, speed: float = 1.0) -> bytes:
         # Backwards-compatible alias; chunking is handled upstream now.
@@ -93,8 +114,14 @@ class RunPodClient:
         Stream speech by requesting tokens from RunPod and decoding locally.
         (Tier 2 Middleware Implementation)
         """
-        url = settings.ECHOTTS_STREAMING_ENDPOINT or self.run_endpoint
-        
+        # RunPod Serverless Streaming requires POST to /run followed by GET to /stream
+        if self.run_endpoint.endswith('/runsync'):
+            run_url = self.run_endpoint[:-8] + "/run"
+            stream_base_url = self.run_endpoint[:-8] + "/stream"
+        else:
+            run_url = self.run_endpoint
+            stream_base_url = self.base_url + "/stream"
+
         payload = {
             "input": {
                 "text": text,
@@ -107,44 +134,84 @@ class RunPodClient:
             }
         }
         
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                async with client.stream("POST", url, json=payload, headers=self.headers) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            chunk_data = json.loads(line)
+                # 1. Submit Job
+                resp = await client.post(run_url, json=payload, headers=self.headers)
+                resp.raise_for_status()
+                job_data = resp.json()
+                job_id = job_data.get("id")
+                
+                if not job_id:
+                    raise RuntimeError(f"Failed to get job ID from RunPod: {job_data}")
+                
+                logger.info(f"Streaming job submitted: {job_id}")
+
+                # 2. Poll /stream endpoint
+                stream_url = f"{stream_base_url}/{job_id}"
+                is_finished = False
+                
+                while not is_finished:
+                    async with httpx.AsyncClient(timeout=30.0) as stream_client:
+                        s_resp = await stream_client.get(stream_url, headers=self.headers)
+                        s_resp.raise_for_status()
+                        data = s_resp.json()
+                        
+                        status = data.get("status")
+                        stream_data = data.get("stream", [])
+                        
+                        for item in stream_data:
+                            # The item might be the token dict directly or wrapped in 'output'
+                            # Based on verify script, it's wrapped in 'output'
+                            output = item.get('output') if isinstance(item, dict) and 'output' in item else item
                             
-                            # Handle different response formats if needed
-                            # The spec says JSON objects per line
-                            if chunk_data.get('status') == 'complete':
-                                logger.info("RunPod stream completed")
+                            if not isinstance(output, dict):
+                                continue
+
+                            if output.get('status') == 'complete':
+                                logger.info(f"RunPod stream completed for job {job_id}")
+                                is_finished = True
                                 break
                             
-                            tokens = chunk_data.get('tokens')
-                            embedding = chunk_data.get('embedding')
+                            tokens = output.get('tokens')
+                            embedding = output.get('embedding')
                             
                             if tokens is not None and embedding is not None:
                                 audio_bytes = await self._decode_tokens(tokens, embedding)
                                 if audio_bytes:
                                     yield audio_bytes
-                        except json.JSONDecodeError:
-                            logger.warning(f"Failed to parse stream line as JSON: {line}")
-                            continue
-                        except Exception as e:
-                            logger.error(f"Error processing stream chunk: {e}")
-                            continue
+                        
+                        if status in ["COMPLETED", "FAILED"]:
+                            if status == "FAILED":
+                                logger.error(f"RunPod job {job_id} failed: {data.get('error')}")
+                            is_finished = True
+                        else:
+                            # Small delay between polls
+                            await asyncio.sleep(0.5)
+
             except Exception as e:
                 logger.error(f"Error during streaming request: {e}")
                 raise
 
     async def _decode_tokens(self, tokens, embedding) -> bytes:
         """
-        Decodes LinaCodec tokens using the Python subprocess script.
+        Decodes LinaCodec tokens using the local SafeLinaCodec instance or subprocess.
         """
         try:
+            # Prefer in-process decoding
+            if DECODER:
+                # SafeLinaCodec.decode returns a Tensor (float32)
+                audio_tensor = DECODER.decode(tokens, embedding)
+                
+                # Convert to numpy
+                audio_float = audio_tensor.cpu().numpy() if hasattr(audio_tensor, 'cpu') else audio_tensor
+                
+                # Convert to int16 PCM (48kHz)
+                audio_int16 = (audio_float * 32767).astype(np.int16)
+                
+                return audio_int16.tobytes()
+
+            # Fallback to subprocess
             process = await asyncio.create_subprocess_exec(
                 "python3", "scripts/decode_linacodec.py",
                 stdin=asyncio.subprocess.PIPE,
@@ -161,8 +228,83 @@ class RunPodClient:
                 
             return stdout
         except Exception as e:
-            logger.error(f"Failed to execute decoder subprocess: {e}")
+            logger.error(f"Failed to decode tokens: {e}")
             return b""
+
+    async def transcode_stream(self, pcm_stream, output_format: str = "mp3"):
+        """
+        Transcodes a raw PCM (48kHz, 16-bit, mono) stream to the target format using ffmpeg.
+        """
+        if output_format == "pcm":
+            async for chunk in pcm_stream:
+                yield chunk
+            return
+
+        # Map format to ffmpeg codec
+        codec_map = {
+            "mp3": "libmp3lame",
+            "opus": "libopus",
+            "aac": "aac",
+            "flac": "flac",
+            "wav": "pcm_s16le" # wav is container, usually pcm inside
+        }
+        codec = codec_map.get(output_format, "libmp3lame")
+        
+        format_map = {
+            "mp3": "mp3",
+            "opus": "opus",
+            "aac": "adts", # ADTS for streaming AAC
+            "flac": "flac",
+            "wav": "wav"
+        }
+        fmt = format_map.get(output_format, output_format)
+
+        # Start ffmpeg process
+        # Input: -f s16le -ar 48000 -ac 1 -i pipe:0
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "pipe:0",
+            "-c:a", codec,
+            "-f", fmt,
+            "pipe:1",
+            "-v", "quiet", # Suppress output
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        async def writer():
+            try:
+                async for chunk in pcm_stream:
+                    if process.stdin:
+                        process.stdin.write(chunk)
+                        await process.stdin.drain()
+                if process.stdin:
+                    process.stdin.close()
+            except Exception as e:
+                logger.error(f"Error writing to ffmpeg stdin: {e}")
+                if process.stdin:
+                    process.stdin.close()
+
+        async def reader():
+            try:
+                while True:
+                    chunk = await process.stdout.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            except Exception as e:
+                logger.error(f"Error reading from ffmpeg stdout: {e}")
+
+        # Run writer in background
+        writer_task = asyncio.create_task(writer())
+        
+        # Yield output from reader
+        async for chunk in reader():
+            yield chunk
+            
+        await writer_task
+        await process.wait()
 
     async def _execute_job(self, text: str, voice: str, speed: float) -> bytes:
         # 1. Submit
@@ -247,42 +389,39 @@ class RunPodClient:
         raise TimeoutError(f"Job {job_id} timed out after {settings.RUNPOD_JOB_TIMEOUT_SECONDS}s")
 
     async def _fetch_result(self, client: httpx.AsyncClient, output: dict) -> bytes:
-        # Output is likely {"audio_url": "..."} or "message" or directly the result?
-        # The doc says: "fetch presigned audio URL"
-        # The RunPod worker usually returns something like {"message": "..."} or {"audio": "base64"} or {"result_url": "..."}
-        # Let's assume it returns a URL to download.
-        # Inspecting standard RunPod behavior or implementation doc...
-        # Doc: "On completion, fetch presigned audio URL"
-        
-        # We'll look for common keys.
+        # Case 1: Direct Audio (Base64) - e.g., pcm_24
+        if isinstance(output, dict) and 'audio' in output:
+            import base64
+            try:
+                return base64.b64decode(output['audio'])
+            except Exception as e:
+                logger.error(f"Failed to decode base64 audio: {e}")
+                return b""
+
+        # Case 2: LinaCodec Tokens - needs local decoding
+        if isinstance(output, dict) and 'tokens' in output and 'embedding' in output:
+            return await self._decode_tokens(output['tokens'], output['embedding'])
+
+        # Case 3: Legacy URL (S3/Cloud output)
         url = None
-        if isinstance(output, str):
-            # Sometimes output is just the string URL? Unlikely but possible.
-            if output.startswith('http'):
-                url = output
+        if isinstance(output, str) and output.startswith('http'):
+            url = output
         elif isinstance(output, dict):
             url = output.get('audio_url') or output.get('url') or output.get('file_url')
             
         if not url:
-            # Fallback check if it's base64?
-            # If we can't find a URL, this is an issue.
-            # Let's assume 'message' contains it if the worker is "standard".
-            # Or maybe 'audio' key.
-            # Without the exact worker code, we guess 'audio_url'.
-            # If the user says "RunPod serverless TTS worker", it likely returns an audio file path/url.
-            logger.warning(f"Could not find obvious URL in output: {output}. checking other keys.")
-            # fallback to values that look like URLs
-            for v in output.values():
-                if isinstance(v, str) and v.startswith('http'):
-                    url = v
-                    break
+            # Fallback scan for URL values
+            if isinstance(output, dict):
+                for v in output.values():
+                    if isinstance(v, str) and v.startswith('http'):
+                        url = v
+                        break
         
         if not url:
-             raise ValueError(f"No audio URL found in RunPod output: {output}")
+             logger.error(f"No audio found in RunPod output: {output.keys() if isinstance(output, dict) else output}")
+             raise ValueError(f"No audio URL or data found in RunPod output")
 
         logger.info(f"Downloading audio from {url}")
-        # Use a fresh request for download to avoid auth header issues (e.g. S3 presigned urls might conflict with Bearer auth)
-        # S3 usually doesn't like unexpected Authorization headers.
         async with httpx.AsyncClient(timeout=30.0) as dl_client:
             resp = await dl_client.get(url)
             resp.raise_for_status()

@@ -587,11 +587,11 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         if output_format == 'pcm_16':
             # Stream decoded audio chunks (for Cloudflare Workers)
             rp_log("[Tier 3] Streaming decoded audio (pcm_16)")
-            return runpod.stream(generate_audio_stream_decoded(text, voice, model))
+            yield from generate_audio_stream_decoded(text, voice, model)
         else:
             # Stream LinaCodec tokens (for local middleware)
             rp_log("[Tier 3] Streaming LinaCodec tokens")
-            return runpod.stream(generate_linacodec_token_stream(text, voice, model))
+            yield from generate_linacodec_token_stream(text, voice, model)
     else:
         # Batch mode (original behavior)
         return generate_batch_audio(text, voice, model, output_format)

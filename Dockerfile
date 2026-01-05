@@ -37,9 +37,11 @@ COPY voice_map.json ./
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
 
-# Set HF_HOME to a writable location
+# Set HF_HOME and TORCH_HOME to writable locations
 ENV HF_HOME=/app/.cache/huggingface
+ENV TORCH_HOME=/home/appuser/.cache/torch
 RUN mkdir -p /app/.cache/huggingface && chown -R appuser:appuser /app/.cache
+RUN mkdir -p /home/appuser/.cache/torch && chown -R appuser:appuser /home/appuser/.cache
 
 USER appuser
 

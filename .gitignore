@@ -51,3 +51,5 @@ env/
 # OS-specific files
 .DS_Store
 Thumbs.db
+cache/
+scripts/verify_*.py

@@ -77,21 +77,59 @@ async def create_speech(
             content={"error": {"message": "Input text is empty.", "type": "invalid_request_error"}},
         )
 
+    # Determine Media Type
+    media_type = f"audio/{request.response_format}"
+    if request.response_format == "mp3":
+        media_type = "audio/mpeg"
+    elif request.response_format == "pcm":
+        media_type = "audio/pcm" # Custom
+
+    # Streaming Mode
+    if request.stream and settings.ENABLE_STREAMING:
+        logger.info(f"Processing streaming request: voice={request.voice}, fmt={request.response_format}")
+        
+        # 1. Get raw PCM stream (48kHz)
+        pcm_stream = runpod_client.stream_speech(request.input, request.voice, request.speed)
+        
+        # 2. Transcode if needed
+        if request.response_format != "pcm":
+            output_stream = runpod_client.transcode_stream(pcm_stream, request.response_format)
+        else:
+            output_stream = pcm_stream
+
+        return StreamingResponse(
+            output_stream,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    # Batch Mode
     logger.info(f"Processing batch request: voice={request.voice}, fmt={request.response_format}")
 
     async def audio_generator():
         try:
+            # Get raw PCM (or audio) from RunPod
             audio_bytes = await runpod_client.process_text(
                 request.input, request.voice, request.speed
             )
-            yield audio_bytes
+            
+            # If format is not PCM, we need to transcode the single batch
+            if request.response_format != "pcm":
+                # Helper to turn bytes into a generator for transcode_stream
+                async def bytes_gen():
+                    yield audio_bytes
+                
+                async for chunk in runpod_client.transcode_stream(bytes_gen(), request.response_format):
+                    yield chunk
+            else:
+                yield audio_bytes
         except Exception as e:
             logger.error(f"Error processing batch request: {e}")
             return
-
-    media_type = f"audio/{request.response_format}"
-    if request.response_format == "mp3":
-        media_type = "audio/mpeg"
     
     filename = f"speech.{request.response_format}"
     

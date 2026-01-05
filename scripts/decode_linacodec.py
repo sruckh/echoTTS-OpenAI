@@ -18,12 +18,18 @@ Environment:
 import sys
 import json
 import io
+import os
 
 # =============================================================================
 # LINACODEC IMPORTS
 # =============================================================================
 try:
     from linacodec.codec import LinaCodec
+    from linacodec.model import LinaCodecModel
+    from linacodec.module.distill_wavlm import wav2vec2_model
+    from linacodec.vocoder.vocos import Vocos
+    from linacodec.util import vocode
+    from huggingface_hub import snapshot_download
     import torch
     import numpy as np
     LINACODEC_AVAILABLE = True
@@ -39,15 +45,64 @@ except ImportError:
 # Note: Each subprocess invocation starts fresh, but model loads from disk cache
 _decoder = None
 
+class SafeLinaCodec(LinaCodec):
+    """
+    A wrapper around LinaCodec that safely handles CPU-only environments.
+    The original LinaCodec hardcodes .cuda() in __init__ and load_distilled_wavlm.
+    """
+    def __init__(self):
+        # Determine device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Download model (same as original)
+        model_path = snapshot_download("YatharthS/LinaCodec")
+        
+        # Load model with correct device placement
+        self.model = LinaCodecModel.from_pretrained(
+            config_path=f"{model_path}/config.yaml", 
+            weights_path=f'{model_path}/model.safetensors'
+        ).eval().to(self.device)
+        
+        # Manual implementation of load_distilled_wavlm to avoid .cuda()
+        # Original: self.model.load_distilled_wavlm(f"{model_path}/wavlm_encoder.pth")
+        ckpt = torch.load(f"{model_path}/wavlm_encoder.pth", map_location=self.device)
+        w_model = wav2vec2_model(**ckpt["config"])
+        w_model.load_state_dict(ckpt["state_dict"], strict=False)
+        self.model.wavlm_model = w_model.to(self.device)
+        self.model.distilled_layers = [6, 8]
+
+        # Load vocoder
+        self.vocos = Vocos.from_hparams(f'{model_path}/vocoder/config.yaml').to(self.device)
+        self.vocos.load_state_dict(torch.load(f'{model_path}/vocoder/pytorch_model.bin', map_location=self.device))
+
+    def decode(self, content_tokens, global_embedding):
+        """decodes tokens and embedding into 48khz waveform"""
+        if not isinstance(content_tokens, torch.Tensor):
+            content_tokens = torch.tensor(content_tokens)
+        if not isinstance(global_embedding, torch.Tensor):
+            global_embedding = torch.tensor(global_embedding)
+
+        content_tokens = content_tokens.to(self.device)
+        global_embedding = global_embedding.to(self.device)
+
+        ## decode tokens and embedding to mel spectrogram
+        with torch.no_grad():
+            # Use autocast only if on CUDA
+            if self.device.type == 'cuda':
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    mel_spectrogram = self.model.decode(content_token_indices=content_tokens, global_embedding=global_embedding)
+                    waveform = vocode(self.vocos, mel_spectrogram.unsqueeze(0))
+            else:
+                mel_spectrogram = self.model.decode(content_token_indices=content_tokens, global_embedding=global_embedding)
+                waveform = vocode(self.vocos, mel_spectrogram.unsqueeze(0))
+                
+        return waveform
+
 def get_decoder():
     """Get or create LinaCodec decoder instance (cached in process)"""
     global _decoder
     if _decoder is None:
-        # We don't want to print to stdout as it's used for binary audio
-        # Using stderr for logging
-        # print("[Tier 2][Python] Loading LinaCodec model...", file=sys.stderr)
-        _decoder = LinaCodec()
-        # print("[Tier 2][Python] LinaCodec loaded!", file=sys.stderr)
+        _decoder = SafeLinaCodec()
     return _decoder
 
 def decode_tokens(tokens, embedding):
@@ -69,7 +124,6 @@ def decode_tokens(tokens, embedding):
         embedding = np.array(embedding)
 
     # Decode tokens to audio (48kHz float32)
-    # Ensure tokens are on the correct device if needed, but LinaCodec usually handles it
     audio = decoder.decode(tokens, embedding)
 
     # Convert float32 to int16 PCM
@@ -86,7 +140,6 @@ def main():
         input_data = sys.stdin.read()
 
         if not input_data.strip():
-            # print("[Tier 2][Python] Error: No input data", file=sys.stderr)
             sys.exit(1)
 
         # Parse JSON input
@@ -95,17 +148,13 @@ def main():
         embedding = data.get('embedding')
 
         if tokens is None:
-            # print("[Tier 2][Python] Error: Missing 'tokens' in input", file=sys.stderr)
             sys.exit(1)
 
         if embedding is None:
-            # print("[Tier 2][Python] Error: Missing 'embedding' in input", file=sys.stderr)
             sys.exit(1)
 
         # Decode tokens
-        # print(f"[Tier 2][Python] Decoding {len(tokens)} tokens...", file=sys.stderr)
         audio_bytes = decode_tokens(tokens, embedding)
-        # print(f"[Tier 2][Python] Output {len(audio_bytes)} bytes", file=sys.stderr)
 
         # Write to stdout (binary PCM)
         sys.stdout.buffer.write(audio_bytes)
